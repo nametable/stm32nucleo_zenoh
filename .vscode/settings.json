@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "platform.h": "c",
+        "zenoh-pico.h": "c",
+        "random": "c",
+        "gpio.h": "c"
+    }
+}

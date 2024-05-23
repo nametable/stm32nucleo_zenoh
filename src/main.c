@@ -1,6 +1,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 
+#include <zenoh-pico.h>
+
 /* 1000 msec = 1 sec */
 #define SLEEP_TIME_MS 300
 
@@ -17,7 +19,7 @@ static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
 
-void main(void)
+void old_main(void)
 {
     printk("Hello World! %s\n", CONFIG_BOARD);
 
