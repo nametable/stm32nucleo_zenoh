@@ -24,12 +24,15 @@
 // serial@40004400 -- this is the one!
 // serial@40011000
 #define KEYEXPR "clk_man"
+#define SUB_KEYEXPR "hw/led0"
 #define VALUE "[STSTM32]{nucleo-F466RE} Pub from Zenoh-Pico!"
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
 #define BUTTON_NODE DT_ALIAS(sw0)
+#define LED_NODE DT_ALIAS(led0)
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(LED_NODE, gpios);
 
 static inline uint32_t bswap32(uint32_t input_long)
 {
@@ -38,6 +41,19 @@ static inline uint32_t bswap32(uint32_t input_long)
            ((input_long & 0x0000FF00) << 8) |
            ((input_long & 0x00FF0000) >> 8) |
            ((input_long & 0xFF000000) >> 24);
+}
+
+void data_handler(const z_sample_t *sample, void *arg) {
+    unsigned int val = 0;
+    if (sample->payload.len == 4) {
+        val = *(sample->payload.start + 3);
+    } else if (sample->payload.len == 8) {
+        val = *(sample->payload.start + 7);
+    }
+    gpio_pin_set_dt(&led, val);
+    // z_owned_str_t keystr = z_keyexpr_to_string(sample->keyexpr);
+    // printf(" >> [Subscriber handler] Received ('%s': '%.*s')\n", z_loan(keystr), (int)sample->payload.len, sample->payload.start);
+    // z_drop(z_move(keystr));
 }
 
 #if Z_FEATURE_PUBLICATION == 1
@@ -88,13 +104,26 @@ int main(int argc, char **argv) {
     }
     printf("OK\n");
 
-	int ret = gpio_pin_configure_dt(&button, GPIO_INPUT | GPIO_PULL_UP);
+	int ret = gpio_pin_configure_dt(&led, GPIO_OUTPUT_ACTIVE);
 	if (ret < 0)
 	{
 		return;
 	}
 
-    char buf[256];
+    z_owned_closure_sample_t callback = z_closure(data_handler);
+    z_owned_subscriber_t sub = z_declare_subscriber(z_loan(s), z_keyexpr(SUB_KEYEXPR), z_move(callback), NULL);
+    if (!z_check(sub)) {
+        printf("Unable to declare subscriber.\n");
+        exit(-1);
+    }
+
+	ret = gpio_pin_configure_dt(&button, GPIO_INPUT | GPIO_PULL_UP);
+	if (ret < 0)
+	{
+		return;
+	}
+
+    // char buf[256];
     int64_t next_keep_alive = k_uptime_get();
     int last_sent_value = -1;
     for (int idx = 0; 1; ++idx) {
@@ -123,10 +152,20 @@ int main(int argc, char **argv) {
             next_keep_alive = now + 1000;
             zp_send_keep_alive(z_loan(s), NULL);
         }
+
+        zp_read_options_t read_options = zp_read_options_default();
+
+        // uart_pending_in
+
+        bool ready = *((unsigned int*)USART2_BASE) & USART_SR_RXNE; // check if RXNE is set, data is ready to read
+        if (ready) {
+            int8_t ret = zp_read(z_loan(s), NULL);
+        }
     }
 
     printf("Closing Zenoh Session...");
     z_undeclare_publisher(z_move(pub));
+    z_undeclare_subscriber(z_move(sub));
 
     // Stop the receive and the session lease loop for zenoh-pico
     zp_stop_read_task(z_loan(s));
