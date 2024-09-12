@@ -43,12 +43,20 @@ static inline uint32_t bswap32(uint32_t input_long)
            ((input_long & 0xFF000000) >> 24);
 }
 
-void data_handler(const z_sample_t *sample, void *arg) {
+void data_handler(const z_loaned_sample_t *sample, void *arg) {
+    z_view_string_t keystr;
+    z_keyexpr_as_view_string(z_sample_keyexpr(sample), &keystr);
+    z_owned_slice_t value;
+    z_bytes_deserialize_into_slice(z_sample_payload(sample), &value);
+
+    uint8_t * data = z_slice_data(z_loan(value));
+    uint8_t len = z_slice_len(z_loan(value));
+
     unsigned int val = 0;
-    if (sample->payload.len == 4) {
-        val = *(sample->payload.start + 3);
-    } else if (sample->payload.len == 8) {
-        val = *(sample->payload.start + 7);
+    if (len == 4) {
+        val = *(data + 3);
+    } else if (len == 8) {
+        val = *(data + 7);
     }
     gpio_pin_set_dt(&led, val);
     // z_owned_str_t keystr = z_keyexpr_to_string(sample->keyexpr);
@@ -66,18 +74,19 @@ int main(int argc, char **argv) {
     // a++;
     // printk("I didn't die\n");
     // printk("a: %d\n", a);
-    sleep(1);
+    sleep(5);
 
 
     // https://github.com/vortex314/zenoh-projects/blob/1cf8b706074bb4ef03190e21a6365c433bed21e6/espidf_serial/src/main.cpp
 
     printk("Starting Zenoh-Pico Publisher...\n");
     // Initialize Zenoh Session and other parameters
-    z_owned_config_t config = z_config_default();
+    z_owned_config_t config;
+    z_config_default(&config);
     printk("Inserting config mode key: '%s'...\n", MODE);
-    zp_config_insert(z_loan(config), Z_CONFIG_MODE_KEY, z_string_make(MODE));
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_MODE_KEY, MODE);
     printk("Inserting config connect key: '%s'...\n", CONNECT0);
-    zp_config_insert(z_loan(config), Z_CONFIG_CONNECT_KEY, z_string_make(CONNECT0));
+    zp_config_insert(z_loan_mut(config), Z_CONFIG_CONNECT_KEY, CONNECT0);
     // if (strcmp(CONNECT, "") != 0) {
     //     zp_config_insert(z_loan(config), Z_CONFIG_CONNECT_KEY, z_string_make(CONNECT));
     //     zp_config_insert(z_loan(config), Z_CONFIG_CONNECT_KEY, z_string_make(CONNECT));
@@ -85,8 +94,10 @@ int main(int argc, char **argv) {
 
     // Open Zenoh session
     printf("Opening Zenoh Session...");
-    z_owned_session_t s = z_open(z_move(config));
-    if (!z_check(s)) {
+    z_owned_session_t s;
+
+    int8_t ret8 = z_open(&s, z_move(config));
+    if (ret8 < 0) {
         printf("Unable to open session!\n");
         exit(-1);
     }
@@ -96,9 +107,13 @@ int main(int argc, char **argv) {
     zp_start_read_task(z_loan(s), NULL);
     zp_start_lease_task(z_loan(s), NULL);
 
+    z_view_keyexpr_t ke;
+    z_view_keyexpr_from_str_unchecked(&ke, KEYEXPR);
+
     printf("Declaring publisher for '%s'...", KEYEXPR);
-    z_owned_publisher_t pub = z_declare_publisher(z_loan(s), z_keyexpr(KEYEXPR), NULL);
-    if (!z_check(pub)) {
+    z_owned_publisher_t pub;
+    if (z_declare_publisher(&pub, z_loan(s), z_loan(ke), NULL) < 0)
+    {
         printf("Unable to declare publisher for key expression!\n");
         exit(-1);
     }
@@ -110,9 +125,14 @@ int main(int argc, char **argv) {
 		return;
 	}
 
-    z_owned_closure_sample_t callback = z_closure(data_handler);
-    z_owned_subscriber_t sub = z_declare_subscriber(z_loan(s), z_keyexpr(SUB_KEYEXPR), z_move(callback), NULL);
-    if (!z_check(sub)) {
+    z_owned_closure_sample_t callback;
+    z_closure(&callback, data_handler);
+
+    z_view_keyexpr_t sub_ke;
+    z_view_keyexpr_from_str_unchecked(&sub_ke, SUB_KEYEXPR);
+
+    z_owned_subscriber_t sub;
+    if (z_declare_subscriber(&sub, z_loan(s), z_loan(sub_ke), z_move(callback), NULL) < 0) {
         printf("Unable to declare subscriber.\n");
         exit(-1);
     }
@@ -132,11 +152,17 @@ int main(int argc, char **argv) {
         // sprintf(buf, "[%4d] %s", idx, VALUE);
         // printf("Putting Data ('%s': '%s')... button: %d\n", KEYEXPR, buf, button_value);
         // z_publisher_put(z_loan(pub), (const uint8_t *)buf, strlen(buf), NULL);
-        z_publisher_put_options_t options = z_publisher_put_options_default();
-        options.encoding = z_encoding(Z_ENCODING_PREFIX_APP_OCTET_STREAM, NULL);
+        z_publisher_put_options_t options;
+        z_publisher_put_options_default(&options);
+        // options.encoding = z_encoding(Z_ENCODING_PREFIX_APP_OCTET_STREAM, NULL);
 
         if (button_value != last_sent_value) {
-            z_publisher_put(z_loan(pub), (const uint8_t *)&button_value, 4, &options);
+            // Create payload
+            z_owned_bytes_t payload;
+            z_bytes_serialize_from_buf(&payload, (const uint8_t *)&button_value, 4);
+            // z_bytes_serialize_from_str(&payload, (const uint8_t *)&button_value);
+
+            z_publisher_put(z_loan(pub), z_move(payload), &options);
             last_sent_value = button_value;
         }
 
@@ -153,14 +179,15 @@ int main(int argc, char **argv) {
             zp_send_keep_alive(z_loan(s), NULL);
         }
 
-        zp_read_options_t read_options = zp_read_options_default();
+        // zp_read_options_t read_options;
+        // zp_read_options_default(&read_options);
 
         // uart_pending_in
 
-        bool ready = *((unsigned int*)USART2_BASE) & USART_SR_RXNE; // check if RXNE is set, data is ready to read
-        if (ready) {
-            int8_t ret = zp_read(z_loan(s), NULL);
-        }
+        // bool ready = *((unsigned int*)USART2_BASE) & USART_SR_RXNE; // check if RXNE is set, data is ready to read
+        // if (ready) {
+        //     int8_t ret = zp_read(z_loan(s), NULL);
+        // }
     }
 
     printf("Closing Zenoh Session...");
